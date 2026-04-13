@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>VidPull</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0d0d0d; --text: #f0f0f0; --muted: #555;
+    --accent: #c8f542; --accent-text: #0d0d0d;
+    --processing: #f0f0f0; --processing-text: #0d0d0d;
+    --save: #4dffa3; --save-text: #0d0d0d;
+    --error: #ff4d4d; --error-text: #0d0d0d;
+    --mono: 'DM Mono', monospace; --display: 'Syne', sans-serif;
+  }
+  body {
+    background: var(--bg); color: var(--text); font-family: var(--mono);
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 1.5rem;
+  }
+
+  #mainBtn {
+    width: 180px; height: 180px; border-radius: 50%;
+    border: none; cursor: pointer;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    transition: background 0.4s ease, transform 0.15s;
+    background: var(--accent);
+    position: relative; overflow: hidden;
+  }
+  #mainBtn:hover { transform: scale(1.04); }
+  #mainBtn:active { transform: scale(0.96); }
+  #mainBtn:disabled { cursor: not-allowed; transform: none; }
+
+  #mainBtn .btn-icon svg { display: block; }
+  #mainBtn .btn-label { font-family: var(--display); font-size: 1rem; font-weight: 700; letter-spacing: -0.01em; }
+  #mainBtn .btn-sub   { font-size: 0.58rem; letter-spacing: 0.07em; text-transform: uppercase; opacity: 0.45; }
+
+  /* spinning ring for processing */
+  #spinRing {
+    position: absolute; inset: 0; border-radius: 50%;
+    pointer-events: none; opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #spinRing::after {
+    content: '';
+    position: absolute; inset: 6px;
+    border-radius: 50%;
+    border: 3px solid transparent;
+    border-top-color: rgba(0,0,0,0.25);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  #statusText {
+    font-size: 0.7rem; color: var(--muted);
+    text-align: center; letter-spacing: 0.04em;
+    min-height: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<button id="mainBtn" onclick="handleClick()">
+  <div id="spinRing"></div>
+  <div id="btnIcon" class="btn-icon">
+    <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d0d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v13M5 14l7 7 7-7"/><line x1="3" y1="21" x2="21" y2="21"/>
+    </svg>
+  </div>
+  <span id="btnLabel" class="btn-label">Download</span>
+  <span id="btnSub" class="btn-sub">paste &amp; go</span>
+</button>
+
+<div id="statusText">Copy a video URL, then tap</div>
+
+<script>
+const btn       = document.getElementById('mainBtn');
+const spinRing  = document.getElementById('spinRing');
+const btnIcon   = document.getElementById('btnIcon');
+const btnLabel  = document.getElementById('btnLabel');
+const btnSub    = document.getElementById('btnSub');
+const statusEl  = document.getElementById('statusText');
+
+let currentTaskId = null;
+let poller = null;
+let completedFile = null;
+
+const STATES = {
+  idle: {
+    bg: 'var(--accent)', iconColor: '#0d0d0d', labelColor: '#0d0d0d',
+    icon: `<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d0d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13M5 14l7 7 7-7"/><line x1="3" y1="21" x2="21" y2="21"/></svg>`,
+    label: 'Download', sub: 'paste &amp; go', spin: false, disabled: false
+  },
+  processing: {
+    bg: 'var(--processing)', iconColor: '#0d0d0d', labelColor: '#0d0d0d',
+    icon: `<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d0d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>`,
+    label: 'Processing', sub: 'please wait', spin: true, disabled: true
+  },
+  done: {
+    bg: 'var(--save)', iconColor: '#0d0d0d', labelColor: '#0d0d0d',
+    icon: `<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d0d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+    label: 'Save Video', sub: 'tap to save', spin: false, disabled: false
+  },
+  error: {
+    bg: 'var(--error)', iconColor: '#0d0d0d', labelColor: '#0d0d0d',
+    icon: `<svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#0d0d0d" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`,
+    label: 'Try Again', sub: 'tap to retry', spin: false, disabled: false
+  }
+};
+
+function setState(name, status) {
+  const s = STATES[name];
+  btn.style.background = s.bg;
+  btnIcon.innerHTML = s.icon;
+  btnLabel.textContent = s.label;
+  btnLabel.style.color = s.labelColor;
+  btnSub.innerHTML = s.sub;
+  btnSub.style.color = s.labelColor;
+  spinRing.style.opacity = s.spin ? '1' : '0';
+  btn.disabled = s.disabled;
+  if (status) statusEl.textContent = status;
+}
+
+async function handleClick() {
+  if (completedFile) { saveFile(); return; }
+
+  const state = btnLabel.textContent;
+  if (state === 'Try Again') { setState('idle', 'Copy a URL and tap'); return; }
+
+  btn.disabled = true;
+  statusEl.textContent = 'Reading clipboard...';
+
+  let url = '';
+  try {
+    url = (await navigator.clipboard.readText()).trim();
+  } catch {
+    setState('error', 'Clipboard access denied');
+    return;
+  }
+
+  if (!url || !url.startsWith('http')) {
+    setState('error', 'No URL in clipboard');
+    return;
+  }
+
+  setState('processing', 'Starting download...');
+
+  try {
+    const res = await fetch('/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      setState('error', e.detail || 'Server rejected the URL');
+      return;
+    }
+
+    const { task_id } = await res.json();
+    currentTaskId = task_id;
+    startPolling(task_id);
+
+  } catch (e) {
+    setState('error', 'Network error');
+  }
+}
+
+function startPolling(id) {
+  if (poller) clearInterval(poller);
+  poller = setInterval(async () => {
+    try {
+      const d = await fetch('/status/' + id).then(r => r.json());
+
+      if (d.status === 'downloading') {
+        statusEl.textContent = 'Downloading... ' + (d.progress || '');
+      } else if (d.status === 'compressing') {
+        statusEl.textContent = 'Compressing...';
+      } else if (d.status === 'completed') {
+        clearInterval(poller);
+        completedFile = d.file;
+        setState('done', 'Ready');
+      } else if (d.status === 'error') {
+        clearInterval(poller);
+        setState('error', d.error || 'Download failed');
+      }
+    } catch {}
+  }, 1000);
+}
+
+function saveFile() {
+  if (!completedFile) return;
+  window.location.href = '/download-file?path=' + encodeURIComponent(completedFile);
+  completedFile = null;
+  setTimeout(() => setState('idle', 'Copy a video URL, then tap'), 1500);
+}
+</script>
+</body>
+</html>
